@@ -128,6 +128,9 @@ func TestActionsObserverEnumeratesExactHeadMultipleWorkflowsAndMatrixJobs(t *tes
 				{"id":1003,"run_id":102,"name":"optional deploy","status":"completed","conclusion":"skipped","head_sha":"` + actionsHeadA + `","completed_at":"2026-08-06T10:04:00Z"}
 			]}]`,
 		},
+		actionsWorkflowsCommand("base/repo"): {
+			stdout: actionsWorkflowsPayload(map[int64]string{11: "CI", 12: "Guard"}),
+		},
 	}), nil, "", "base/repo", Options{ActionsOnly: true})
 
 	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "42", URL: "https://github.com/base/repo/pull/42"})
@@ -148,6 +151,58 @@ func TestActionsObserverEnumeratesExactHeadMultipleWorkflowsAndMatrixJobs(t *tes
 		if !strings.HasPrefix(check.Link, "https://github.com/base/repo/actions/runs/") {
 			t.Errorf("check %q link = %q, want base-repository Actions identity", check.Name, check.Link)
 		}
+	}
+}
+
+func TestActionsObserverRequiresCompleteWorkflowRegistrationBeforeGreen(t *testing.T) {
+	t.Parallel()
+
+	host := NewWithOptions(githubTestCmdFactory(map[string]githubTestResponse{
+		actionsPRCommand("base/repo", "42"):           {stdout: actionsPRPayload(actionsHeadA, "contributor/repo", "base/repo")},
+		actionsRunsCommand("base/repo", actionsHeadA): {stdout: singleActionsRun(actionsHeadA, "success", "pull_request")},
+		actionsJobsCommand("base/repo", 101):          {stdout: singleActionsJob(actionsHeadA, "success")},
+		actionsWorkflowsCommand("base/repo"): {
+			stdout: actionsWorkflowsPayload(map[int64]string{11: "CI", 12: "Security"}),
+		},
+	}), nil, "", "base/repo", Options{ActionsOnly: true})
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "42"})
+	if err != nil {
+		t.Fatalf("GetChecks() error = %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("GetChecks() = %+v, want observed job plus missing-workflow pending check", checks)
+	}
+	foundPending := false
+	for _, check := range checks {
+		if check.Name == "Security" && check.Bucket == scm.CheckBucketPending && check.State == "WORKFLOW_NOT_REGISTERED" {
+			foundPending = true
+		}
+		if check.Bucket == scm.CheckBucketFail {
+			t.Fatalf("GetChecks() = %+v, want delayed registration pending evidence, not failed evidence", checks)
+		}
+	}
+	if !foundPending {
+		t.Fatalf("GetChecks() = %+v, want missing workflow reported as pending", checks)
+	}
+}
+
+func TestActionsObserverCompleteWorkflowDiscoveryFailureIsObservationError(t *testing.T) {
+	t.Parallel()
+
+	host := NewWithOptions(githubTestCmdFactory(map[string]githubTestResponse{
+		actionsPRCommand("base/repo", "42"):           {stdout: actionsPRPayload(actionsHeadA, "contributor/repo", "base/repo")},
+		actionsRunsCommand("base/repo", actionsHeadA): {stdout: singleActionsRun(actionsHeadA, "success", "pull_request")},
+		actionsJobsCommand("base/repo", 101):          {stdout: singleActionsJob(actionsHeadA, "success")},
+		actionsWorkflowsCommand("base/repo"):          {stderr: "Actions workflow API unavailable", code: 1},
+	}), nil, "", "base/repo", Options{ActionsOnly: true})
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "42"})
+	if err == nil {
+		t.Fatal("GetChecks() error = nil, want workflow discovery observation error")
+	}
+	if checks != nil {
+		t.Fatalf("GetChecks() = %+v, want no check evidence from failed workflow discovery", checks)
 	}
 }
 
@@ -402,6 +457,7 @@ func TestActionsObserverRetriesWhenPRHeadMoves(t *testing.T) {
 		{stdout: singleActionsJob(actionsHeadA, "failure")},
 		{stdout: singleActionsJob(actionsHeadB, "success")},
 	}
+	responses[actionsWorkflowsCommand("base/repo")] = []githubTestResponse{{stdout: actionsWorkflowsPayload(map[int64]string{11: "CI"})}}
 
 	host := NewWithOptions(sequencedGithubTestCmdFactory(responses), nil, "", "base/repo", Options{ActionsOnly: true})
 	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "42"})
@@ -523,6 +579,10 @@ func actionsJobsCommand(repo string, runID int64) string {
 	return fmt.Sprintf("gh api --method GET repos/%s/actions/runs/%d/jobs -f filter=latest -f per_page=100 --paginate --slurp", repo, runID)
 }
 
+func actionsWorkflowsCommand(repo string) string {
+	return "gh api --method GET repos/" + repo + "/actions/workflows -f per_page=100 --paginate --slurp"
+}
+
 func actionsPRPayload(head, headRepo, baseRepo string) string {
 	return `{"head":{"sha":"` + head + `","repo":{"full_name":"` + headRepo + `"}},"base":{"repo":{"full_name":"` + baseRepo + `"}}}`
 }
@@ -533,6 +593,14 @@ func singleActionsRun(head, conclusion, event string) string {
 
 func singleActionsJob(head, conclusion string) string {
 	return `[{"total_count":1,"jobs":[{"id":1001,"run_id":101,"name":"test","status":"completed","conclusion":"` + conclusion + `","head_sha":"` + head + `","completed_at":"2026-08-06T10:05:00Z"}]}]`
+}
+
+func actionsWorkflowsPayload(workflows map[int64]string) string {
+	items := make([]string, 0, len(workflows))
+	for id, name := range workflows {
+		items = append(items, fmt.Sprintf(`{"id":%d,"name":%q,"state":"active"}`, id, name))
+	}
+	return fmt.Sprintf(`[{"total_count":%d,"workflows":[%s]}]`, len(items), strings.Join(items, ","))
 }
 
 func sequencedGithubTestCmdFactory(responses map[string][]githubTestResponse) CmdFactory {

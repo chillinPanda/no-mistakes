@@ -39,6 +39,12 @@ type actionsWorkflowRun struct {
 	updatedAt time.Time
 }
 
+type actionsWorkflow struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	State string `json:"state"`
+}
+
 type actionsWorkflowJob struct {
 	ID             int64   `json:"id"`
 	RunID          int64   `json:"run_id"`
@@ -193,7 +199,101 @@ func (h *Host) getActionsChecksAtHead(ctx context.Context, repo, headSHA string)
 		}
 		checks = append(checks, runChecks...)
 	}
+	if actionsChecksCanCertifyGreen(checks) {
+		workflows, err := h.getActiveActionsWorkflows(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		checks = appendMissingWorkflowChecks(checks, runs, workflows)
+	}
 	return checks, nil
+}
+
+func (h *Host) getActiveActionsWorkflows(ctx context.Context, repo string) ([]actionsWorkflow, error) {
+	endpoint := "repos/" + repo + "/actions/workflows"
+	out, err := h.runGitHubAPIPaginated(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return parseActionsWorkflowPages(out)
+}
+
+func parseActionsWorkflowPages(data []byte) ([]actionsWorkflow, error) {
+	var pages []struct {
+		TotalCount *int              `json:"total_count"`
+		Workflows  []actionsWorkflow `json:"workflows"`
+	}
+	if err := json.Unmarshal(data, &pages); err != nil {
+		return nil, fmt.Errorf("parse GitHub Actions workflow pages: %w", err)
+	}
+	if len(pages) == 0 {
+		return nil, errors.New("GitHub Actions workflow discovery returned no pages")
+	}
+
+	total := -1
+	seen := make(map[int64]struct{})
+	workflows := make([]actionsWorkflow, 0)
+	for pageIndex, page := range pages {
+		if page.TotalCount == nil || *page.TotalCount < 0 {
+			return nil, fmt.Errorf("GitHub Actions workflow page %d has no valid total_count", pageIndex+1)
+		}
+		if total == -1 {
+			total = *page.TotalCount
+		} else if *page.TotalCount != total {
+			return nil, fmt.Errorf("GitHub Actions workflow page %d total_count is %d, want %d", pageIndex+1, *page.TotalCount, total)
+		}
+		for _, workflow := range page.Workflows {
+			if workflow.ID <= 0 {
+				return nil, fmt.Errorf("GitHub Actions workflow page %d contains a workflow without a valid id", pageIndex+1)
+			}
+			if _, ok := seen[workflow.ID]; ok {
+				return nil, fmt.Errorf("GitHub Actions workflow id %d appears more than once", workflow.ID)
+			}
+			seen[workflow.ID] = struct{}{}
+			workflow.Name = strings.TrimSpace(workflow.Name)
+			workflow.State = strings.ToLower(strings.TrimSpace(workflow.State))
+			if workflow.Name == "" || workflow.State == "" {
+				return nil, fmt.Errorf("GitHub Actions workflow %d has incomplete name or state", workflow.ID)
+			}
+			if workflow.State == "active" {
+				workflows = append(workflows, workflow)
+			}
+		}
+	}
+	if len(seen) != total {
+		return nil, fmt.Errorf("GitHub Actions workflow discovery returned %d unique workflows, want %d", len(seen), total)
+	}
+	return workflows, nil
+}
+
+func appendMissingWorkflowChecks(checks []scm.Check, runs []actionsWorkflowRun, workflows []actionsWorkflow) []scm.Check {
+	registered := make(map[int64]struct{}, len(runs))
+	for _, run := range runs {
+		registered[run.WorkflowID] = struct{}{}
+	}
+	for _, workflow := range workflows {
+		if _, ok := registered[workflow.ID]; ok {
+			continue
+		}
+		checks = append(checks, scm.Check{
+			Name:   workflow.Name,
+			Bucket: scm.CheckBucketPending,
+			State:  "WORKFLOW_NOT_REGISTERED",
+		})
+	}
+	return checks
+}
+
+func actionsChecksCanCertifyGreen(checks []scm.Check) bool {
+	if len(checks) == 0 {
+		return false
+	}
+	for _, check := range checks {
+		if check.Bucket != scm.CheckBucketPass && check.Bucket != scm.CheckBucketSkip {
+			return false
+		}
+	}
+	return true
 }
 
 func parseActionsRunPages(data []byte, headSHA, repo string) ([]actionsWorkflowRun, error) {
