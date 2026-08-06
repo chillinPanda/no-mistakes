@@ -35,6 +35,9 @@ func TestLoadGlobal_Defaults(t *testing.T) {
 	if len(cfg.AgentPathOverride) != 0 {
 		t.Errorf("agent_path_override = %v, want empty", cfg.AgentPathOverride)
 	}
+	if got := Merge(cfg, &RepoConfig{}).CI.GitHubObserver; got != GitHubObserverChecks {
+		t.Errorf("ci.github_observer = %q, want safe default %q", got, GitHubObserverChecks)
+	}
 }
 
 func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
@@ -54,6 +57,7 @@ func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
 		"step_quiet_warning:",
 		"daemon_connect_timeout:",
 		"log_level: info",
+		"# github_observer: actions",
 		"# agent_path_override:",
 		"# commit:",
 		`#   fix_message: "no-mistakes({{.Step}}): {{.Summary}}"`,

@@ -30,8 +30,9 @@ document:
     its project-specific verification sequence and other load-bearing operating
     guidance.
 
-# CI settings are trusted-default-branch policy. github_observer defaults to the
-# complete PR status rollup; repositories whose authoritative CI is exclusively
-# GitHub Actions may opt into the narrower fine-grained-PAT path with `actions`.
+# CI settings here are trusted-default-branch policy and override their global
+# values. github_observer otherwise comes from ~/.no-mistakes/config.yaml, then
+# defaults to the complete PR status rollup. Repositories whose authoritative CI
+# is exclusively GitHub Actions may select the narrower fine-grained-PAT path.
 # ci:
 #   github_observer: actions

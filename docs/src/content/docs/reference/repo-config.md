@@ -8,9 +8,9 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.github_observer`, and `ci.rerun_transient` only from that trusted copy.
+The daemon also reads the repository values for `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.github_observer`, and `ci.rerun_transient` only from that trusted copy. For `ci.github_observer` and `ci.rerun_transient`, an absent trusted repository value leaves the operator-owned global value in effect.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
-A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
+A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses operator-global values, then built-in defaults.
 Commit the gate-control settings you want to your default branch.
 Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`) are still read from the pushed branch.
 
@@ -64,7 +64,8 @@ auto_fix:
   lint: 5
   ci: 3
 
-# Read only from the trusted default branch.
+# Repository values are read only from the trusted default branch and override
+# their operator-owned global values.
 ci:
   # Keep the complete PR status rollup by default. Set this to actions only
   # when every authoritative CI signal for the repository is GitHub Actions.
@@ -128,7 +129,7 @@ Opt in to honoring the code-executing selection fields (`commands.{test,lint,for
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands` and `agent` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. This opt-in covers those two fields only; `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.github_observer`, and `ci.rerun_transient` stay trusted-only either way. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands` and `agent` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. This opt-in covers those two fields only; repository values for `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.github_observer`, and `ci.rerun_transient` stay trusted-only either way. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
 
 ### disable_project_settings
 
@@ -344,23 +345,15 @@ Select the evidence source used to decide GitHub CI readiness.
 | Values | `checks`, `actions` |
 | Default | `checks` |
 | Trust | Read only from the trusted default branch |
+| Precedence | Overrides `~/.no-mistakes/config.yaml` |
 
-`checks` preserves the complete PR status-rollup observer. It includes GitHub Actions jobs, third-party GitHub App CheckRuns, and legacy commit statuses, and remains the safe default. A failure to read that rollup never falls back to a narrower green result; persistent read failures park at an ask-user gate.
-
-`actions` is an explicit repository contract that **every CI signal no-mistakes must enforce is GitHub Actions**. Use it only when external GitHub Apps and legacy commit statuses are not authoritative for the repository. The observer reads the numeric PR's current head SHA from the explicit base repository, exhaustively paginates every Actions workflow run for that SHA and every latest-attempt job, then reads the PR head again before accepting the result. It does not filter by branch, workflow, or event. A moved head is discarded and retried. Incomplete pagination, the Actions search cap, malformed or unknown data, unsupported trigger/SHA semantics such as `pull_request_target` and `merge_group`, and a terminal run with no job evidence all stay not-ready or failing rather than certifying green. Zero exact-head runs remain not-ready unless [`no_ci: true`](#no_ci) is also trusted.
+This repository value wins over the operator's [`ci.github_observer`](/no-mistakes/reference/global-config/#cigithub_observer). If the trusted default branch omits it, the global value applies; if both omit it, `checks` applies. The normal global-then-repository overlay is therefore preserved without allowing the pushed branch to participate.
 
 :::caution[Actions-only visibility boundary]
-The Actions API cannot show third-party GitHub App CheckRuns or legacy commit statuses. Selecting `actions` therefore cannot prove those external signals are absent or green. A feature branch cannot select this narrower observer, clear a trusted selection, or enable it through `allow_repo_commands`.
+The Actions API cannot show third-party GitHub App CheckRuns or legacy commit statuses. Select `actions` only when every authoritative CI signal for this repository is GitHub Actions. A feature branch cannot select an observer, override or clear the global value, clear a trusted selection, or enable it through `allow_repo_commands`.
 :::
 
-For a fine-grained PAT in Actions-only mode, grant:
-
-- **Pull requests: read** to read the exact PR head.
-- **Actions: read** to enumerate workflow runs, latest-attempt jobs, and failed logs.
-- **Actions: write** only when [`ci.rerun_transient`](#cirerun_transient) is greater than `0` and provider-side reruns are desired.
-- No **Checks** permission is required by the Actions-only observer.
-
-These are the CI-observation permissions; repository push and PR creation may require their own permissions.
+The [global observer reference](/no-mistakes/reference/global-config/#cigithub_observer) owns the complete rollup versus exact-head Actions contract, fail-closed behavior, least-privilege PAT permissions, rollout verification, and rollback instructions shared by both configuration sources.
 
 ### ci.rerun_transient
 

@@ -212,7 +212,7 @@ func ciCheckReadFailureOutcome(err error) *pipeline.StepOutcome {
 		Summary: "CI checks could not be read from the provider",
 		Items: []Finding{{
 			Severity:    "warning",
-			Description: fmt.Sprintf("CI checks could not be read from the provider: %v. Verify that the provider CLI or credentials are installed, authenticated, and authorized to read the configured CI evidence. On GitHub, the default checks observer needs the complete PR status rollup; ci.github_observer: actions instead requires the trusted repository declaration and Actions read.", err),
+			Description: fmt.Sprintf("CI checks could not be read from the provider: %v. Verify that the provider CLI or credentials are installed, authenticated, and authorized to read the configured CI evidence. On GitHub, the default checks observer needs the complete PR status rollup; ci.github_observer: actions instead requires an operator-global or trusted repository selection and Actions read.", err),
 			Action:      types.ActionAskUser,
 		}},
 	}

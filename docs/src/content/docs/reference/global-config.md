@@ -51,6 +51,7 @@ auto_fix:
   ci: 3
 
 ci:
+  github_observer: checks
   rerun_transient: 0
 
 commit:
@@ -314,6 +315,46 @@ For empty `commands.lint`, the document step's combined housekeeping pass also a
 Legacy alias: `auto_fix.babysit`.
 
 These are global defaults. Per-repo config can override individual steps.
+
+### ci.github_observer
+
+Select the evidence source used to decide GitHub CI readiness.
+
+| | |
+|---|---|
+| Type | `string` |
+| Values | `checks`, `actions` |
+| Default | `checks` |
+| Precedence | Trusted default-branch repository value, then global value, then the built-in default |
+
+To select Actions-only observation for every repository that does not declare its own trusted override, edit the existing global config file:
+
+```yaml
+# ~/.no-mistakes/config.yaml
+ci:
+  github_observer: actions
+```
+
+`checks` preserves the complete PR status-rollup observer. It includes GitHub Actions jobs, third-party GitHub App CheckRuns, and legacy commit statuses, and remains the safe default. A failure to read that rollup never falls back to a narrower green result; persistent read failures park at an ask-user gate.
+
+`actions` is an explicit operator contract that every CI signal no-mistakes must enforce for the affected repositories is GitHub Actions. The observer reads the numeric PR's exact current head SHA from the explicit base repository, exhaustively paginates every workflow run for that SHA and every latest-attempt job, then reads the PR head again before accepting the result. It does not filter by branch, workflow, or event. A moved head is discarded and retried. Incomplete pagination, the Actions search cap, malformed or unknown data, unsupported trigger/SHA semantics such as `pull_request_target` and `merge_group`, and a terminal run with no job evidence all stay not-ready or failing rather than certifying green. Zero exact-head runs remain not-ready unless the trusted repository config also declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci).
+
+:::caution[Actions-only scope and visibility]
+The Actions API cannot show third-party GitHub App CheckRuns or legacy commit statuses. Global `actions` applies to every repository without a trusted default-branch override, so audit that whole scope before enabling it. Add `ci.github_observer: checks` to the trusted default branch of any exception first. A feature branch can neither select an observer nor override or clear the global value.
+:::
+
+For a fine-grained PAT in Actions-only mode, grant:
+
+- **Pull requests: read** to read the exact PR head.
+- **Actions: read** to enumerate workflow runs, latest-attempt jobs, and failed logs.
+- **Actions: write** only when [`ci.rerun_transient`](#cirerun_transient) is greater than `0` and provider-side reruns are desired.
+- No **Checks** permission is required by the Actions-only observer.
+
+These are CI-observation permissions; repository push and PR creation may require their own permissions.
+
+For rollout, first identify every repository that will inherit the global value and confirm all authoritative CI is GitHub Actions. Put trusted `checks` overrides on exceptions, configure the least-privilege PAT, then set the global value. Global config is reloaded while each new run is set up, so no daemon restart is required. Verify one green and one deliberately failing exact-head Actions run: green must become ready, a provider-reported failure must become failed-check evidence, and authorization or transport failures must remain observation errors. Monitor CI-step logs and parked ask-user outcomes for pagination, head-movement, unsupported-event, unknown-state, authorization, or transport diagnostics.
+
+To roll back globally, remove `github_observer` or set it to `checks`; new runs then use the complete rollup unless a trusted repository still overrides it. Roll back any repository-level `actions` overrides separately. The complete rollup credential must be able to read its full Checks/status evidence.
 
 ### ci.rerun_transient
 

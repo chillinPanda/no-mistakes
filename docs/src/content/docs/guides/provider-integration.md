@@ -67,7 +67,7 @@ gh auth status
 `no-mistakes doctor` also checks for `gh` availability.
 For PR and workflow-run commands, no-mistakes passes the repository slug from the recorded upstream remote or PR URL to `gh`, so daemon-run commands do not depend on the daemon's current working directory.
 
-The default GitHub CI observer reads the complete PR status rollup. Repositories whose authoritative CI is entirely GitHub Actions can instead select the trusted [`ci.github_observer: actions`](/no-mistakes/reference/repo-config/#cigithub_observer) mode. Its least-privilege fine-grained PAT contract is Pull requests read plus Actions read, with Actions write only when transient reruns are configured; it does not require Checks permission. The config reference owns the visibility warning for third-party App CheckRuns and legacy statuses.
+The default GitHub CI observer reads the complete PR status rollup. Operators whose affected repositories use GitHub Actions for every authoritative CI signal can select [`ci.github_observer: actions`](/no-mistakes/reference/global-config/#cigithub_observer) globally, and a trusted default-branch repository value can override that selection in either direction. Its least-privilege fine-grained PAT contract is Pull requests read plus Actions read, with Actions write only when transient reruns are configured; it does not require Checks permission. The global config reference owns source precedence, rollout, rollback, and the visibility warning for third-party App CheckRuns and legacy statuses.
 
 **What you get:**
 
