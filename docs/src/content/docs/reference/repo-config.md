@@ -386,7 +386,7 @@ A single non-cancelled failure, or a merge conflict, suppresses the rerun for th
 The budget is per check per run and is spent when the rerun is requested, so a provider that refuses the request cannot be retried in a loop.
 Check names are not unique on a pull request, so same-named checks share one budget.
 
-A rerun request returns as soon as the provider accepts it, while the new attempt replaces the cancelled check in the status rollup a moment later.
+A rerun request returns as soon as the provider accepts it, while the new attempt replaces the cancelled check in the observed provider evidence a moment later.
 A poll that still reads the exact completion the rerun was requested for has observed nothing new, so the monitor waits for a bounded couple of polls rather than escalating a check it never actually re-ran.
 A provider that accepts a rerun and never publishes it cannot stall the run past that.
 Once the provider publishes a conclusive replacement, no-mistakes durably stops treating that rerun as outstanding while preserving the spent budget; if the exact watched head is then green, the monitor reports `checks-passed` normally.
