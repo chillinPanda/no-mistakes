@@ -24,6 +24,13 @@ type Host struct {
 	host         string // repo's GitHub hostname; scopes the auth check
 	repo         string // "owner/name" slug for --repo; empty when unknown
 	forkOwner    string // fork owner for cross-repository PR heads
+	actionsOnly  bool   // observe exact-head Actions runs/jobs instead of the complete PR status rollup
+}
+
+// Options controls GitHub host behavior that differs by trusted repository
+// policy. The zero value preserves the complete PR status-rollup observer.
+type Options struct {
+	ActionsOnly bool
 }
 
 // New builds a Host. cliAvailable reports whether the gh binary is
@@ -37,11 +44,17 @@ type Host struct {
 // branch) and fails on every poll. host is optional; empty reproduces the
 // legacy unscoped auth-check behavior.
 func New(cmd CmdFactory, cliAvailable func() bool, host, repo string) *Host {
+	return NewWithOptions(cmd, cliAvailable, host, repo, Options{})
+}
+
+// NewWithOptions builds a Host with trusted repository-specific behavior.
+func NewWithOptions(cmd CmdFactory, cliAvailable func() bool, host, repo string, options Options) *Host {
 	return &Host{
 		cmd:          cmd,
 		cliAvailable: cliAvailable,
 		host:         strings.TrimSpace(host),
 		repo:         strings.TrimSpace(repo),
+		actionsOnly:  options.ActionsOnly,
 	}
 }
 
@@ -50,7 +63,12 @@ func New(cmd CmdFactory, cliAvailable func() bool, host, repo string) *Host {
 // because gh pr create expects --head <owner>:<branch>. host is optional; see
 // New for its role in scoping the auth check.
 func NewWithFork(cmd CmdFactory, cliAvailable func() bool, host, repo, forkRepo string) *Host {
-	h := New(cmd, cliAvailable, host, repo)
+	return NewWithForkOptions(cmd, cliAvailable, host, repo, forkRepo, Options{})
+}
+
+// NewWithForkOptions is NewWithFork with trusted repository-specific options.
+func NewWithForkOptions(cmd CmdFactory, cliAvailable func() bool, host, repo, forkRepo string, options Options) *Host {
+	h := NewWithOptions(cmd, cliAvailable, host, repo, options)
 	h.forkOwner = repoOwner(forkRepo)
 	return h
 }
@@ -293,6 +311,9 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 }
 
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
+	if h.actionsOnly {
+		return h.getActionsChecks(ctx, pr)
+	}
 	selector, err := prSelector(pr)
 	if err != nil {
 		return nil, err
@@ -345,7 +366,7 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 // dashboard, or a run path this backend cannot read - names no re-runnable job,
 // and the error says so rather than falling back to a wider rerun.
 func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error {
-	rerunArgs, ok := rerunTargetArgs(check.Link)
+	rerunArgs, ok := h.rerunTargetArgs(check)
 	if !ok {
 		return fmt.Errorf("check %q has no GitHub Actions job to re-run", check.Name)
 	}
@@ -353,7 +374,7 @@ func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error
 	args = append(args, h.repoArgs()...)
 	cmd := h.cmd(ctx, "gh", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("gh run rerun: %s: %w", strings.TrimSpace(string(out)), err)
+		return githubCommandError(ctx, "gh run rerun", out, err)
 	}
 	return nil
 }
@@ -361,13 +382,15 @@ func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error
 // rerunTargetArgs turns a check's details link into the `gh run rerun`
 // arguments that re-run exactly that work, or reports that the link names
 // nothing this backend can re-run.
-func rerunTargetArgs(link string) ([]string, bool) {
-	runID, jobID, ok := actionsRerunTarget(link)
+func (h *Host) rerunTargetArgs(check scm.Check) ([]string, bool) {
+	runID, jobID, ok := h.actionsRerunTarget(check.Link)
 	switch {
 	case !ok:
 		return nil, false
 	case jobID != "":
 		return []string{"--job", jobID}, true
+	case h.actionsOnly && strings.EqualFold(strings.TrimSpace(check.State), "CANCELLED"):
+		return []string{runID}, true
 	default:
 		return []string{runID, "--failed"}, true
 	}
@@ -387,17 +410,35 @@ func rerunTargetArgs(link string) ([]string, bool) {
 // check's rerun into all of them on an unparsable link is a blast radius this
 // policy must not take; a link that names only the run itself is the one case
 // where that is exactly what it points at.
-func actionsRerunTarget(link string) (runID, jobID string, ok bool) {
+func (h *Host) actionsRerunTarget(link string) (runID, jobID string, ok bool) {
 	parsed, err := url.Parse(strings.TrimSpace(link))
 	if err != nil {
 		return "", "", false
 	}
 	const runsSegment = "/actions/runs/"
-	idx := strings.Index(parsed.Path, runsSegment)
-	if idx < 0 {
+	start := strings.Index(parsed.Path, runsSegment)
+	if h.actionsOnly {
+		host := strings.TrimSpace(h.host)
+		if host == "" {
+			host = "github.com"
+		}
+		if !strings.EqualFold(parsed.Hostname(), host) {
+			return "", "", false
+		}
+		repo, repoErr := h.actionsRepoSlug()
+		if repoErr != nil {
+			return "", "", false
+		}
+		runsPrefix := "/" + repo + runsSegment
+		if len(parsed.Path) <= len(runsPrefix) || !strings.EqualFold(parsed.Path[:len(runsPrefix)], runsPrefix) {
+			return "", "", false
+		}
+		start = len("/" + repo)
+	}
+	if start < 0 {
 		return "", "", false
 	}
-	segments := strings.Split(strings.Trim(parsed.Path[idx+len(runsSegment):], "/"), "/")
+	segments := strings.Split(strings.Trim(parsed.Path[start+len(runsSegment):], "/"), "/")
 	if len(segments) == 0 || !isNumericID(segments[0]) {
 		return "", "", false
 	}

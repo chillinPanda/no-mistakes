@@ -29,3 +29,9 @@ document:
     and regression tests. Do not duplicate generic command catalogs, but retain
     its project-specific verification sequence and other load-bearing operating
     guidance.
+
+# CI settings are trusted-default-branch policy. github_observer defaults to the
+# complete PR status rollup; repositories whose authoritative CI is exclusively
+# GitHub Actions may opt into the narrower fine-grained-PAT path with `actions`.
+# ci:
+#   github_observer: actions

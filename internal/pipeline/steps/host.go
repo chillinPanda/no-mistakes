@@ -6,6 +6,7 @@ import (
 	"os/exec"
 
 	"github.com/kunchenguid/no-mistakes/internal/bitbucket"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/azuredevops"
@@ -45,7 +46,11 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 			// the plain slug (without host prefix) is correct here.
 			forkRepo = github.RepoSlug(sctx.Repo.ForkURL)
 		}
-		return github.NewWithFork(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, repo, forkRepo), ""
+		options := github.Options{}
+		if sctx.Config != nil && sctx.Config.CI.GitHubObserver == config.GitHubObserverActions {
+			options.ActionsOnly = true
+		}
+		return github.NewWithForkOptions(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, repo, forkRepo, options), ""
 	case scm.ProviderGitLab:
 		if sctx.Repo.ForkURL != "" {
 			// Fork MR routing for GitLab is intentionally not half-wired.

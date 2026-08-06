@@ -190,6 +190,51 @@ func TestMerge_CIRerunTransientDefaultsToOnePerCheck(t *testing.T) {
 	}
 }
 
+func TestMerge_GitHubObserverFromRepoConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		want    GitHubObserver
+		wantErr string
+	}{
+		{name: "unset preserves complete checks observer", yaml: "ci: {}\n", want: GitHubObserverChecks},
+		{name: "explicit complete checks observer", yaml: "ci:\n  github_observer: checks\n", want: GitHubObserverChecks},
+		{name: "actions only observer", yaml: "ci:\n  github_observer: actions\n", want: GitHubObserverActions},
+		{name: "unknown observer fails closed", yaml: "ci:\n  github_observer: magic\n", wantErr: "ci.github_observer"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, err := LoadRepoFromBytes([]byte(tc.yaml))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("LoadRepoFromBytes() error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadRepoFromBytes() error = %v", err)
+			}
+			if got := Merge(DefaultGlobalConfig(), repo).CI.GitHubObserver; got != tc.want {
+				t.Fatalf("ci.github_observer = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadGlobal_RejectsRepositoryOnlyGitHubObserver(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("ci:\n  github_observer: actions\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadGlobal(path)
+	if err == nil || !strings.Contains(err.Error(), "repository-only") {
+		t.Fatalf("LoadGlobal() error = %v, want repository-only rejection", err)
+	}
+}
+
 func TestMerge_CIRerunTransientFromRepoConfig(t *testing.T) {
 	cases := []struct {
 		name string
@@ -293,6 +338,26 @@ func TestEffectiveRepoConfig_CIRerunTransientTrustedOnly(t *testing.T) {
 	}
 	if got := Merge(DefaultGlobalConfig(), withoutTrusted).CI.RerunTransient; got != DefaultCIRerunTransient {
 		t.Fatalf("resolved ci.rerun_transient without a trusted copy = %d, want the built-in default %d", got, DefaultCIRerunTransient)
+	}
+}
+
+func TestEffectiveRepoConfig_GitHubObserverTrustedOnly(t *testing.T) {
+	pushed := &RepoConfig{CI: CIRaw{GitHubObserver: GitHubObserverActions}}
+	trustedChecks := &RepoConfig{CI: CIRaw{GitHubObserver: GitHubObserverChecks}}
+	trustedActions := &RepoConfig{CI: CIRaw{GitHubObserver: GitHubObserverActions}}
+
+	if got := EffectiveRepoConfig(pushed, trustedChecks, false).CI.GitHubObserver; got != GitHubObserverChecks {
+		t.Fatalf("pushed actions/trusted checks observer = %q, want trusted %q", got, GitHubObserverChecks)
+	}
+	if got := EffectiveRepoConfig(&RepoConfig{}, trustedActions, false).CI.GitHubObserver; got != GitHubObserverActions {
+		t.Fatalf("pushed unset/trusted actions observer = %q, want trusted %q", got, GitHubObserverActions)
+	}
+	if got := EffectiveRepoConfig(pushed, trustedChecks, true).CI.GitHubObserver; got != GitHubObserverChecks {
+		t.Fatalf("allow_repo_commands leaked pushed observer = %q, want trusted %q", got, GitHubObserverChecks)
+	}
+	withoutTrusted := EffectiveRepoConfig(pushed, nil, false)
+	if got := Merge(DefaultGlobalConfig(), withoutTrusted).CI.GitHubObserver; got != GitHubObserverChecks {
+		t.Fatalf("observer without trusted config = %q, want safe default %q", got, GitHubObserverChecks)
 	}
 }
 

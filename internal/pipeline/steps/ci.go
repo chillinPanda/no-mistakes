@@ -204,6 +204,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	timeoutFailingChecks := []string{}
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
+	consecutiveCheckErrors := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
@@ -303,7 +304,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			clearCIMonitorReady(sctx)
 			lastMonitorLog = ""
 			sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
+			consecutiveCheckErrors++
+			if consecutiveCheckErrors >= consecutiveCheckErrorLimit {
+				sctx.Log(fmt.Sprintf("CI checks could not be read %d consecutive times, parking for a decision", consecutiveCheckErrors))
+				return ciCheckReadFailureOutcome(err), nil
+			}
 		} else {
+			consecutiveCheckErrors = 0
 			// checksPending is the narrow execution state: only checks that are
 			// actively running or queued block a rerun or issue escalation. A
 			// provider-cancelled check is terminal enough to enter the transient

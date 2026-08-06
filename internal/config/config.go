@@ -344,11 +344,29 @@ type AutoFixRaw struct {
 	Rebase   *int `yaml:"rebase"`
 }
 
-// CIRaw is the YAML representation of CI-step settings.
-// Pointer fields distinguish "not set" (nil) from "set to 0" (disabled).
+// CIRaw is the YAML representation of CI-step settings. RerunTransient uses a
+// pointer to distinguish "not set" from "set to 0"; GitHubObserver uses empty
+// as unset and is rejected in global config because it is repository trust.
 type CIRaw struct {
 	RerunTransient *int `yaml:"rerun_transient"`
+	// GitHubObserver selects the GitHub CI evidence source. It is accepted only
+	// in repository config and EffectiveRepoConfig keeps it trusted-only: the
+	// Actions observer intentionally cannot see third-party CheckRuns or legacy
+	// commit statuses, so a pushed branch must never select that narrower view.
+	GitHubObserver GitHubObserver `yaml:"github_observer"`
 }
+
+// GitHubObserver selects how GitHub CI results are discovered.
+type GitHubObserver string
+
+const (
+	// GitHubObserverChecks is the default complete PR status-rollup observer.
+	// It includes Actions jobs, third-party CheckRuns, and legacy statuses.
+	GitHubObserverChecks GitHubObserver = "checks"
+	// GitHubObserverActions observes only exact-head GitHub Actions runs/jobs.
+	// Repositories may select it only from trusted default-branch config.
+	GitHubObserverActions GitHubObserver = "actions"
+)
 
 // CI holds the resolved CI-step settings.
 type CI struct {
@@ -358,6 +376,9 @@ type CI struct {
 	// an approval gate. 0 disables reruns and restores the behavior of
 	// escalating every failure on sight.
 	RerunTransient int
+	// GitHubObserver is the trusted repository's GitHub CI evidence source.
+	// The zero/unset repository value resolves to GitHubObserverChecks.
+	GitHubObserver GitHubObserver
 }
 
 // AutoFix holds resolved per-step auto-fix attempt limits.
@@ -1138,6 +1159,9 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	if err := validateCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if raw.CI.GitHubObserver != "" {
+		return nil, fmt.Errorf("parse global config: ci.github_observer is repository-only and must be declared on the trusted default branch")
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -1269,11 +1293,24 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := validateReviewRaw(cfg.Review); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	if err := validateRepoCIRaw(cfg.CI); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
+	cfg.CI.GitHubObserver = GitHubObserver(strings.ToLower(strings.TrimSpace(string(cfg.CI.GitHubObserver))))
 	if cfg.AutoFix.CI == nil {
 		cfg.AutoFix.CI = cfg.AutoFix.Babysit
 	}
 
 	return cfg, nil
+}
+
+func validateRepoCIRaw(ci CIRaw) error {
+	switch GitHubObserver(strings.ToLower(strings.TrimSpace(string(ci.GitHubObserver)))) {
+	case "", GitHubObserverChecks, GitHubObserverActions:
+		return nil
+	default:
+		return fmt.Errorf("ci.github_observer must be %q or %q", GitHubObserverChecks, GitHubObserverActions)
+	}
 }
 
 // validateReviewRaw fails the config closed on a review.path_instructions list
@@ -1349,10 +1386,11 @@ func validatePathInstructionGlob(pattern string) error {
 // pushed branch must not steer the reviewer that gates it. DisableProjectSettings
 // is also trusted-only so a pushed branch cannot enable or defeat the gate-agent
 // project-instruction boundary. NoCI is trusted-only so a pushed branch cannot
-// self-declare no-CI and bypass its own checks, and CI (the transient-rerun
-// budget) is trusted-only because every rerun it authorizes is another
-// provider-side workflow run billed to the repository. All five ignore
-// allowRepoCommands, which scopes only the code-executing selection fields.
+// self-declare no-CI and bypass its own checks, and CI is trusted-only because
+// its GitHub observer can narrow the evidence boundary and its transient-rerun
+// budget can authorize provider-side workflow runs billed to the repository.
+// All five ignore allowRepoCommands, which scopes only the code-executing
+// selection fields.
 // When allowRepoCommands is
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
 // TRUSTED default-branch copy) to honoring the pushed branch's commands and
@@ -1390,10 +1428,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// default-branch copy so a pushed branch cannot self-declare no-CI and
 		// bypass checks that the default branch still expects.
 		effective.NoCI = trusted.NoCI
-		// ci.rerun_transient spends the maintainer's resources rather than the
-		// contributor's: every rerun is another provider-side workflow run
-		// billed to the repository. It is trusted-only for that reason, so a
-		// pushed branch cannot raise its own rerun budget to the cap.
+		// CI is a maintainer boundary: github_observer can narrow readiness to
+		// Actions-only evidence, while every rerun_transient request spends
+		// another provider-side workflow run. A pushed branch controls neither.
 		effective.CI = trusted.CI
 	} else {
 		effective.Document = DocumentRaw{}
@@ -1506,7 +1543,10 @@ func autoFixDefaults() AutoFix {
 // or a concurrency rule deliberately stopped. Repositories that know their
 // cancellations are provider-side opt in via ci.rerun_transient.
 func ciDefaults() CI {
-	return CI{RerunTransient: DefaultCIRerunTransient}
+	return CI{
+		RerunTransient: DefaultCIRerunTransient,
+		GitHubObserver: GitHubObserverChecks,
+	}
 }
 
 // applyCIOverrides applies non-nil raw values onto resolved defaults, clamping
@@ -1578,6 +1618,9 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	// word on how many workflow runs their project is billed for.
 	applyCIOverrides(&ci, &global.CI)
 	applyCIOverrides(&ci, &repo.CI)
+	if repo.CI.GitHubObserver != "" {
+		ci.GitHubObserver = repo.CI.GitHubObserver
+	}
 
 	intent := intentDefaults()
 	applyIntentOverrides(&intent, &global.Intent)
