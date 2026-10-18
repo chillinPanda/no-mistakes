@@ -332,6 +332,50 @@ func envMap(env []string) map[string]string {
 	return result
 }
 
+func TestResolveGitHubWebHost(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, parentWeb, forkWeb string
+		wantError                bool
+	}{
+		{"public web host", "github.com", "github.com", false},
+		{"enterprise web host", "git.corp.example", "git.corp.example", false},
+		{"conflicting web hosts", "github.com", "other.example", true},
+		{"implicit and explicit identities", "", "github.com", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte("api-gateway.example:\n  user: contributor\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			profiles := config.ForgeProfiles{
+				"api-gateway.example":  {GHConfigDir: dir, ExpectedLogin: "contributor", GitHubWebHost: tc.parentWeb},
+				"fork-gateway.example": {GHConfigDir: dir, ExpectedLogin: "contributor", GitHubWebHost: tc.forkWeb},
+			}
+			resolved, err := Resolve(context.Background(), profiles, "https://api-gateway.example/parent/repo.git", "https://fork-gateway.example/contributor/repo.git")
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+					t.Fatalf("Resolve = %+v, %v, want ambiguous web identity", resolved, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved == nil || resolved.Host != "api-gateway.example" || resolved.GitHubWebHost != tc.parentWeb || resolved.ConfigDir != dir {
+				t.Fatalf("transport/profile/web identity changed: %+v", resolved)
+			}
+			// Only the gateway is present in hosts.yml: canonical web identity
+			// must never require a second credential or replace the isolated profile.
+			env := envMap(resolved.Environment.Apply([]string{"GH_HOST=attacker.example", "GH_TOKEN=ambient"}))
+			if env["GH_CONFIG_DIR"] != dir || env["GH_HOST"] != "" || env["GH_TOKEN"] != "" {
+				t.Fatalf("unexpected profile environment: %#v", env)
+			}
+		})
+	}
+}
+
 func TestResolveEnforcesExpectedGitHubLogin(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte("github.com:\n    user: work-account\n"), 0o644); err != nil {

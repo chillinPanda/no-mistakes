@@ -531,7 +531,25 @@ Each selected GitHub config must contain the target host and exactly one account
 
 Profile activation is provider-specific and fail-closed: after at least one GitHub profile is configured, a GitHub repository must match a GitHub profile; GitLab remains ambient unless a GitLab profile is also configured, and vice versa. With no `forge_profiles`, provider detection and ambient CLI authentication behave exactly as before.
 
-For a GitHub fork, no-mistakes considers both the parent and fork host tokens. A match on either side is sufficient. If both match, they must select the same account: the same effective provider config directory *and* the same `expected_login` pin. Otherwise startup fails as ambiguous, so two host tokens sharing a config directory while pinning different logins can never silently resolve to one of them. Fork PR topology itself is unchanged.
+For a GitHub fork, no-mistakes considers both the parent and fork host tokens. A match on either side is sufficient. If both match, they must select the same account: the same effective provider config directory, the same `expected_login` pin, and the same `github_web_host` setting. Otherwise startup fails as ambiguous, so two host tokens sharing a config directory cannot silently select conflicting accounts or web identities. Fork PR topology itself is unchanged.
+
+#### GitHub API gateways with a separate web host
+
+A GitHub-compatible API gateway can use one hostname for CLI access while returning canonical PR and Actions URLs on another. Set optional `github_web_host` in that gateway's machine-local GitHub profile:
+
+```yaml
+forge_profiles:
+  github-gateway.company.example:
+    gh_config_dir: ~/.config/gh-company
+    expected_login: team-bot
+    github_web_host: github.com
+```
+
+The remote still uses `github-gateway.company.example`, and that host must already work with `gh` and be authenticated in the selected config directory. `github_web_host` sets the expected hostname for PR browser URLs and Actions links, including generated workflow-run links. It accepts a single DNS hostname, such as `github.com` or `git.company.example`, without a scheme, port, path, or wildcard. Surrounding whitespace and letter case are normalized. It requires `gh_config_dir` and is invalid in a GitLab profile.
+
+Git remotes, API requests, `gh --repo`, authentication checks, and credential selection continue to use the gateway. The setting does not configure a proxy server or add arbitrary API base-URL support. An ordinary forward proxy configured through `HTTPS_PROXY` generally keeps the original GitHub hostname and does not need this mapping. User-attachment uploads retain their existing transport-host restrictions; this option does not send gateway credentials directly to the web host or enable uploads through an unsupported gateway.
+
+Without this setting, web URLs are checked against the existing remote-derived host as before. With it, only the configured web host is accepted; repository and PR-number checks remain in effect. This is an explicit operator-owned identity mapping, never inferred from API responses or accepted from repository config. If both parent and fork profiles match, both must specify the same mapping, including whether it is set.
 
 Deliberate scope boundaries, so profiles never duplicate what other layers own:
 

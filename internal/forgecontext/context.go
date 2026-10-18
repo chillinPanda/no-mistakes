@@ -18,11 +18,12 @@ import (
 // Context is the resolved forge provider and subprocess environment for one
 // run. It contains configuration locations, never credentials.
 type Context struct {
-	Provider    scm.Provider
-	ProfileHost string
-	Host        string
-	ConfigDir   string
-	Environment runenv.Overlay
+	Provider      scm.Provider
+	ProfileHost   string
+	Host          string
+	ConfigDir     string
+	Environment   runenv.Overlay
+	GitHubWebHost string
 }
 
 // Resolve selects and validates the profile associated with a repository's
@@ -79,11 +80,12 @@ func Resolve(ctx context.Context, profiles config.ForgeProfiles, upstreamURL, fo
 			return nil, fmt.Errorf("forge profile %q: %w", profileHost, err)
 		}
 		return &Context{
-			Provider:    scm.ProviderGitHub,
-			ProfileHost: profileHost,
-			Host:        targetHost,
-			ConfigDir:   profile.GHConfigDir,
-			Environment: githubEnvironment(profile.GHConfigDir),
+			Provider:      scm.ProviderGitHub,
+			ProfileHost:   profileHost,
+			Host:          targetHost,
+			ConfigDir:     profile.GHConfigDir,
+			Environment:   githubEnvironment(profile.GHConfigDir),
+			GitHubWebHost: profile.GitHubWebHost,
 		}, nil
 	}
 	if err := validateGitLabProfile(profile.GLabConfigDir, targetHost, profile.ExpectedLogin); err != nil {
@@ -247,11 +249,13 @@ func selectProfile(profiles config.ForgeProfiles, upstreamHost, forkHost string)
 // selection. The expected_login pin is part of that identity: two profiles
 // sharing a config directory but pinning different logins disagree about which
 // account the run must be signed in as, and silently taking either one is the
-// fallback expectLogin exists to refuse.
+// fallback expectLogin exists to refuse. The web-host mapping must also agree:
+// choosing either side must not silently authorize a different browser identity.
 func sameProfile(a, b config.ForgeProfile) bool {
 	return effectiveProfilePath(a.GHConfigDir) == effectiveProfilePath(b.GHConfigDir) &&
 		effectiveProfilePath(a.GLabConfigDir) == effectiveProfilePath(b.GLabConfigDir) &&
-		normalizeExpectedLogin(a.ExpectedLogin) == normalizeExpectedLogin(b.ExpectedLogin)
+		normalizeExpectedLogin(a.ExpectedLogin) == normalizeExpectedLogin(b.ExpectedLogin) &&
+		strings.EqualFold(strings.TrimSpace(a.GitHubWebHost), strings.TrimSpace(b.GitHubWebHost))
 }
 
 func normalizeExpectedLogin(login string) string {

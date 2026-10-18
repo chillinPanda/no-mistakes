@@ -26,6 +26,7 @@ type Host struct {
 	cmd          CmdFactory
 	cliAvailable func() bool
 	host         string // repo's GitHub hostname; scopes the auth check
+	webHost      string // optional canonical browser hostname; never used for credentials
 	repo         string // "owner/name" slug for --repo; empty when unknown
 	forkOwner    string // fork owner for cross-repository PR heads
 	draft        bool   // open created PRs as drafts (gh pr create --draft)
@@ -64,6 +65,20 @@ func NewWithFork(cmd CmdFactory, cliAvailable func() bool, host, repo, forkRepo 
 	h.forkOwner = repoOwner(forkRepo)
 	h.draft = draft
 	return h
+}
+
+// SetWebHost sets the canonical browser hostname from a validated forge profile.
+// API calls, auth checks, repository selection and uploads retain the transport host.
+// An empty hostname preserves the default identity derived from the remote.
+func (h *Host) SetWebHost(host string) {
+	h.webHost = strings.ToLower(strings.TrimSpace(host))
+}
+
+func (h *Host) browserHost() string {
+	if h.webHost != "" {
+		return h.webHost
+	}
+	return h.host
 }
 
 // RepoSlug extracts the "owner/name" identifier from a GitHub remote or PR
@@ -113,8 +128,21 @@ func (h *Host) repoArgs() []string {
 // resolving the current branch of the cwd, and the daemon runs from a detached
 // bare gate repo whose HEAD is the default branch (main), so an inferred
 // selector silently targets the wrong PR (or none — "no pull requests found for
-// branch main") instead of the feature PR the pipeline already knows.
-func prSelector(pr *scm.PR) (string, error) {
+// branch main") instead of the feature PR the pipeline already knows. With an
+// explicit web-host mapping, convert a validated URL to a number so gh cannot
+// select the canonical web host as its API/credential host from the URL.
+func (h *Host) prSelector(pr *scm.PR) (string, error) {
+	if pr != nil && h.webHost != "" && strings.TrimSpace(pr.URL) != "" {
+		number, err := parsePullRequestURL(pr.URL, h.browserHost(), h.repoSlug())
+		if err != nil {
+			return "", err
+		}
+		selector := strconv.Itoa(number)
+		if n := strings.TrimSpace(pr.Number); n != "" && n != selector {
+			return "", errors.New("PR number does not match canonical URL")
+		}
+		return selector, nil
+	}
 	if pr != nil {
 		if n := strings.TrimSpace(pr.Number); n != "" {
 			return n, nil
@@ -297,7 +325,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 		if url == "" {
 			return nil, fmt.Errorf("parse gh pr list JSON: entry %d missing PR URL", i)
 		}
-		number, err := parsePullRequestURL(url, h.host, h.repoSlug())
+		number, err := parsePullRequestURL(url, h.browserHost(), h.repoSlug())
 		if err != nil {
 			return nil, fmt.Errorf("parse gh pr list JSON: entry %d invalid PR URL: %w", i, err)
 		}
@@ -360,6 +388,14 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 	}
 	url := strings.TrimSpace(string(out))
 	pr := &scm.PR{URL: url}
+	if h.webHost != "" {
+		selector, err := h.prSelector(pr)
+		if err != nil {
+			return nil, fmt.Errorf("parse gh pr create URL: %w", err)
+		}
+		pr.Number = selector
+		return pr, nil
+	}
 	if num, nerr := scm.ExtractPRNumber(url); nerr == nil {
 		pr.Number = num
 	}
@@ -372,7 +408,7 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 // repo and workflow scopes cannot read (it needs read:org), so a pure content
 // rewrite failed for those tokens. The PATCH sends only the fields it changes.
 func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
-	selector, err := prSelector(pr)
+	selector, err := h.prSelector(pr)
 	if err != nil {
 		return nil, err
 	}
@@ -415,7 +451,7 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 var _ scm.PRContentReader = (*Host)(nil)
 
 func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
-	selector, err := prSelector(pr)
+	selector, err := h.prSelector(pr)
 	if err != nil {
 		return scm.PRContent{}, err
 	}
@@ -439,7 +475,7 @@ func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, err
 }
 
 func (h *Host) SetPRBaseBranch(ctx context.Context, pr *scm.PR, baseBranch string) error {
-	selector, err := prSelector(pr)
+	selector, err := h.prSelector(pr)
 	if err != nil {
 		return err
 	}
@@ -453,7 +489,7 @@ func (h *Host) SetPRBaseBranch(ctx context.Context, pr *scm.PR, baseBranch strin
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
-	selector, err := prSelector(pr)
+	selector, err := h.prSelector(pr)
 	if err != nil {
 		return "", err
 	}
@@ -468,7 +504,7 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 }
 
 func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
-	selector, err := prSelector(pr)
+	selector, err := h.prSelector(pr)
 	if err != nil {
 		return "", err
 	}
@@ -482,7 +518,7 @@ func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) 
 }
 
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
-	selector, err := prSelector(pr)
+	selector, err := h.prSelector(pr)
 	if err != nil {
 		return nil, err
 	}
@@ -947,7 +983,7 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 		}
 		link := strings.TrimSpace(run.HTMLURL)
 		if link == "" {
-			host := strings.TrimSpace(h.host)
+			host := strings.TrimSpace(h.browserHost())
 			if host == "" {
 				host = "github.com"
 			}
@@ -1010,7 +1046,7 @@ func (h *Host) actionsRunSegments(link string) ([]string, bool) {
 	if err != nil {
 		return nil, false
 	}
-	host := strings.TrimSpace(h.host)
+	host := strings.TrimSpace(h.browserHost())
 	if host == "" {
 		host = "github.com"
 	}
@@ -1178,7 +1214,7 @@ func isNumericID(value string) bool {
 }
 
 func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.MergeableState, error) {
-	selector, err := prSelector(pr)
+	selector, err := h.prSelector(pr)
 	if err != nil {
 		return "", err
 	}
@@ -1496,7 +1532,7 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 	}
 	prNum := strings.TrimSpace(pr.Number)
 	if prNum == "" {
-		number, parseErr := parsePullRequestURL(pr.URL, h.host, repo)
+		number, parseErr := parsePullRequestURL(pr.URL, h.browserHost(), repo)
 		if parseErr != nil {
 			return nil, parseErr
 		}

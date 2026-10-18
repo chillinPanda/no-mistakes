@@ -344,6 +344,9 @@ type ForgeProfile struct {
 	GHConfigDir   string `yaml:"gh_config_dir"`
 	GLabConfigDir string `yaml:"glab_config_dir"`
 	ExpectedLogin string `yaml:"expected_login"`
+	// GitHubWebHost is the canonical browser hostname when gh uses an API gateway.
+	// It never changes API routing or the host used to select credentials.
+	GitHubWebHost string `yaml:"github_web_host"`
 }
 
 // ForgeProfiles maps a remote host token to its machine-local provider profile.
@@ -2910,6 +2913,15 @@ func normalizeForgeProfiles(raw ForgeProfiles) (ForgeProfiles, error) {
 		profile.GHConfigDir = ghDir
 		profile.GLabConfigDir = glabDir
 		profile.ExpectedLogin = strings.TrimSpace(profile.ExpectedLogin)
+		profile.GitHubWebHost = strings.ToLower(strings.TrimSpace(profile.GitHubWebHost))
+		if profile.GitHubWebHost != "" {
+			if ghDir == "" {
+				return nil, fmt.Errorf("invalid forge_profiles.%s.github_web_host: requires gh_config_dir", host)
+			}
+			if !validGitHubWebHost(profile.GitHubWebHost) {
+				return nil, fmt.Errorf("invalid forge_profiles.%s.github_web_host: expected a DNS hostname without scheme, port, or path", host)
+			}
+		}
 		if ghDir != "" {
 			normalized, err := normalizeForgeProfilePath(ghDir)
 			if err != nil {
@@ -2926,6 +2938,25 @@ func normalizeForgeProfiles(raw ForgeProfiles) (ForgeProfiles, error) {
 		profiles[host] = profile
 	}
 	return profiles, nil
+}
+
+// validGitHubWebHost accepts a plain DNS hostname, never a URL or host pattern.
+// The mapping authorizes a single web identity; API endpoints remain owned by gh.
+func validGitHubWebHost(host string) bool {
+	if len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func normalizeForgeProfilePath(value string) (string, error) {
